@@ -1,6 +1,7 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 import numpy as np
+import warnings
 
 class Diffable(ABC):
     """
@@ -8,10 +9,26 @@ class Diffable(ABC):
     """
 
 
-    def __init__(self):
-        self._sources: dict[Diffable, np.ndarray | None] = {}
+    # Leaf nodes should set this property to false
+    # to disable warnings on object initialization
+    _warn_on_no_sources = True
+
+
+    def __init__(self, *sources: Diffable):
+        self._sources: dict[Diffable, np.ndarray | None] = {source: None for source in sources}
         self._sinks: list[Diffable] = []
         self._value: np.ndarray | None = None
+
+        if len(sources) == 0 and self._warn_on_no_sources:
+            warnings.warn(
+                f"Node '{self.__class__.__name__}' was initialized with no sources. "
+                f"If this is an operation node, it will be disconnected from the graph.",
+                category=UserWarning,
+                stacklevel=2,
+            )
+
+        for source in sources:
+            source._add_sink(self)
 
 
     def _add_source(self, source: Diffable):
