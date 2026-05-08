@@ -59,7 +59,7 @@ class Diffable(ABC, metaclass=_DiffableMeta):
         self._value: np.ndarray | None = None
         self._state: dict = {}
 
-        if len(sources) == 0 and self._warn_on_no_sources:
+        if len(sources) == 0 and type(self)._warn_on_no_sources:
             warnings.warn(
                 f"Node '{self.__class__.__name__}' was initialized with no sources. "
                 f"If this is an operation node, it will be disconnected from the graph.",
@@ -76,8 +76,8 @@ class Diffable(ABC, metaclass=_DiffableMeta):
         Intercepts attribute assignment to warn about potential hidden state bugs.
         """
 
-        if self._warn_on_unmanaged_state and getattr(self, '_init_complete', False):
-            if name not in ('_value', '_sources', '_sinks', '_state'):
+        if type(self)._warn_on_unmanaged_state and getattr(self, '_init_complete', False):
+            if name not in ('_value', '_sources', '_sinks', '_state', '_init_complete'):
                 warnings.warn(
                     f"Potential state leak in '{self.__class__.__name__}': "
                     f"Assigned to 'self.{name}' after initialization.\n"
