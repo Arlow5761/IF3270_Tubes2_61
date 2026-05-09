@@ -19,7 +19,6 @@ class Concatenate(Diffable):
         return np.concatenate(arrays, axis=self._axis)
 
     def _calculate_gradient(self, sources: dict, value: np.ndarray) -> dict:
-        # value = upstream gradient G; split along axis matching source sizes
         sizes = [v.shape[self._axis] for v in sources.values()]
         splits = np.split(value, np.cumsum(sizes[:-1]), axis=self._axis)
         return {node: grad for node, grad in zip(sources.keys(), splits)}

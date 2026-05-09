@@ -14,6 +14,5 @@ class Tanh(Diffable):
         return np.tanh(x)
 
     def _calculate_gradient(self, sources: dict, value: np.ndarray) -> dict:
-        # value = tanh(x), local derivative = 1 - tanh(x)^2
         x_node = next(iter(sources.keys()))
         return {x_node: 1.0 - value ** 2}

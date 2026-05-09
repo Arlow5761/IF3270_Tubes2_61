@@ -221,7 +221,6 @@ class Diffable(ABC, metaclass=_DiffableMeta):
             self.clear_values()
             self.clear_gradients_backwards()
 
-            # Recursively ensure all sources are computed before collecting values.
             for source in self._sources:
                 source.get_value()
 

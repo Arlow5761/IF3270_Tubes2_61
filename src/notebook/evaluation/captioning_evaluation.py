@@ -78,10 +78,8 @@ class ScratchDecoder:
         Returns:
             List of word strings (without <start>/<end>).
         """
-        # Project image feature → embed_dim
         img_proj = _relu(img_feat @ self.w['img_proj_W'] + self.w['img_proj_b'])
 
-        # Initial hidden states
         hs = [np.zeros(u) for u in self.units]
         cs = [np.zeros(u) for u in self.units]
 
@@ -89,10 +87,9 @@ class ScratchDecoder:
         tokens = []
         end_id = self.vocab['<end>']
         pad_id = self.vocab['<pad>']
-        E      = self.w['embedding']      # (vocab_size, embed_dim)
+        E      = self.w['embedding']
 
         for _ in range(max_len):
-            # Pass through each recurrent layer
             for li in range(self.n_layers):
                 if self.cell_type == 'rnn':
                     hs[li] = self._rnn_step(x_t, hs[li], li)
@@ -101,7 +98,6 @@ class ScratchDecoder:
                     hs[li], cs[li] = self._lstm_step(x_t, hs[li], cs[li], li)
                     x_t = hs[li]
 
-            # Project to vocabulary
             logits = x_t @ self.w['output_W'] + self.w['output_b']
             probs  = _softmax(logits)
             tok    = int(np.argmax(probs))
@@ -109,7 +105,7 @@ class ScratchDecoder:
             if tok == end_id or tok == pad_id:
                 break
             tokens.append(tok)
-            x_t = E[tok]                  # teacher-forced replaced by predicted
+            x_t = E[tok]
 
         return [self.id2word.get(t, '<unk>') for t in tokens]
 
@@ -140,26 +136,18 @@ def build_diffable_decoder(weights: dict, cell_type: str, n_layers: int,
 
     Returns (img_inp, cap_inp, output_node).
     """
-    img_inp = Input()    # (N, feature_dim)
-    cap_inp = Input()    # (N, max_len) — integer token indices
+    img_inp = Input()
+    cap_inp = Input()
 
-    # Image projection + reshape → (N, 1, embed_dim)
-    W_proj = Parameter(weights['img_proj_W'])
-    b_proj = Parameter(weights['img_proj_b'])
-    img_p  = ReLU(Linear(img_inp, W_proj, b_proj))   # (N, embed_dim)
+    W_proj  = Parameter(weights['img_proj_W'])
+    b_proj  = Parameter(weights['img_proj_b'])
+    img_p   = ReLU(Linear(img_inp, W_proj, b_proj))
+    img_seq = _ExpandDim(img_p)
 
-    # Expand to (N, 1, embed_dim) — manual reshape handled below in forward pass
-    # We'll use a helper that wraps img_p into a sequence node
-    img_seq = _ExpandDim(img_p)                       # (N, 1, embed_dim)
-
-    # Caption embedding
     E_mat  = Parameter(weights['embedding'])
-    cap_e  = Embedding(cap_inp, E_mat)                # (N, max_len, embed_dim)
+    cap_e  = Embedding(cap_inp, E_mat)
 
-    # Concatenate img_seq + cap_e → (N, max_len+1, embed_dim)
     seq = ConcatNode(img_seq, cap_e, axis=1)
-
-    # Recurrent layers
     x = seq
     for li in range(n_layers):
         if cell_type == 'lstm':
@@ -173,12 +161,11 @@ def build_diffable_decoder(weights: dict, cell_type: str, n_layers: int,
             b  = Parameter(weights[f'rnn_{li}_b'])
             x  = SimpleRNN(x, Wx, Wh, b, return_sequences=True)
 
-    # Slice to max_len timesteps, then project
-    x_sliced = _SliceSeq(x, max_len)                  # (N, max_len, units)
+    x_sliced = _SliceSeq(x, max_len)
 
     W_out = Parameter(weights['output_W'])
     b_out = Parameter(weights['output_b'])
-    out   = _SeqLinear(x_sliced, W_out, b_out)        # (N, max_len, vocab_size)
+    out   = _SeqLinear(x_sliced, W_out, b_out)
 
     return img_inp, cap_inp, out
 
@@ -247,10 +234,8 @@ def evaluate_corpus(hypotheses: list, ref_map: dict, img_order: list) -> dict:
     return {'bleu4': float(bleu4), 'meteor': meteor}
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    # ── Load preprocessed data ────────────────────────────────────────────────
     test_img = np.load(PROC_DIR / 'test_img_feats.npy')
 
     with open(PROC_DIR / 'vocab.json') as f:
@@ -266,9 +251,6 @@ def main():
     with open(MODELS_DIR / 'captioning_results.json') as f:
         train_results = json.load(f)
 
-    # ════════════════════════════════════════════════════════════════════════
-    # A. All 12 variants: BLEU-4 + METEOR + execution time (from-scratch)
-    # ════════════════════════════════════════════════════════════════════════
     print('\n══ A. All 12 variants (from-scratch greedy decode) ══')
     print(f'{"Tag":<28}  {"BLEU-4":>7}  {"METEOR":>7}  {"time(s)":>8}')
     print('─' * 60)
@@ -297,9 +279,6 @@ def main():
                                 **metrics, 'scratch_time': dt,
                                 'keras_bleu4': r['test_bleu4']})
 
-    # ════════════════════════════════════════════════════════════════════════
-    # B. Best Keras vs best from-scratch (per cell type)
-    # ════════════════════════════════════════════════════════════════════════
     print('\n══ B. Keras vs From-Scratch (best per cell type) ══')
     for cell in ['rnn', 'lstm']:
         cell_res = [r for r in scratch_results if r['cell_type'] == cell]
@@ -313,9 +292,6 @@ def main():
         diff = abs(best_scratch['bleu4'] - best_keras['keras_bleu4'])
         print(f'    |diff| BLEU-4  = {diff:.4f}')
 
-    # ════════════════════════════════════════════════════════════════════════
-    # C. RNN vs LSTM: qualitative analysis on 10 test images
-    # ════════════════════════════════════════════════════════════════════════
     print('\n══ C. RNN vs LSTM: qualitative analysis ══')
     best_rnn  = max([r for r in scratch_results if r['cell_type'] == 'rnn'],
                     key=lambda x: x['bleu4'])
@@ -346,9 +322,6 @@ def main():
         refs = ref_map.get(img_name, ['(no reference)'])
         print(f'        REF: {refs[0][:90]}')
 
-    # ════════════════════════════════════════════════════════════════════════
-    # D. Max caption length sweep (best overall model)
-    # ════════════════════════════════════════════════════════════════════════
     print('\n══ D. Max caption length sweep ══')
     best_overall = max(scratch_results, key=lambda x: x['bleu4'])
     tag_best     = best_overall['tag']
@@ -366,12 +339,11 @@ def main():
     print(f'  {"max_len":<10}  {"BLEU-4":>7}  {"METEOR":>7}')
     print('  ' + '─' * 30)
 
-    for ml in [15, 25, 35, 50]:    # ≥ 3 variations
+    for ml in [15, 25, 35, 50]:
         hyps_ml = [dec_best.generate(test_img[i], ml) for i in range(len(test_img))]
         m = evaluate_corpus(hyps_ml, ref_map, test_imgs_order)
         print(f'  {ml:<10}  {m["bleu4"]:>7.4f}  {m["meteor"]:>7.4f}')
 
-    # ── Final summary ─────────────────────────────────────────────────────
     print('\n══ Final Summary ══')
     print(f'{"Tag":<28}  {"Scratch BLEU4":>13}  {"Keras BLEU4":>11}  {"METEOR":>7}  {"time(s)":>8}')
     print('─' * 80)

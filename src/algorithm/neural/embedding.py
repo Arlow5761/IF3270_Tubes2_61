@@ -22,7 +22,6 @@ class Embedding(Diffable):
         return matrix[indices.astype(int)]
 
     def _calculate_gradient(self, sources: dict, value: np.ndarray) -> dict:
-        # value = upstream gradient G, same shape as output (..., embed_dim)
         indices_node, matrix_node = list(sources.keys())
         indices, matrix = list(sources.values())
         d_matrix = np.zeros_like(matrix)

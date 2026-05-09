@@ -26,7 +26,6 @@ PROC_DIR   = REPO_ROOT / 'data_processed'
 MODELS_DIR = REPO_ROOT / 'models_captioning'
 MODELS_DIR.mkdir(exist_ok=True)
 
-# ─── Hyper-parameters ────────────────────────────────────────────────────────
 EMBED_DIM   = 256
 EPOCHS      = 30
 BATCH_SIZE  = 64
@@ -37,7 +36,6 @@ CELL_TYPES  = ['rnn', 'lstm']
 N_LAYERS    = [1, 2, 3]
 HIDDEN_DIMS = [128, 512]
 
-# ─── Data loading ────────────────────────────────────────────────────────────
 
 def load_data(split: str):
     img_f   = np.load(PROC_DIR / f'{split}_img_feats.npy')
@@ -46,7 +44,6 @@ def load_data(split: str):
     return img_f, dec_in, dec_tgt
 
 
-# ─── Model factory ───────────────────────────────────────────────────────────
 
 def build_model(vocab_size: int, feature_dim: int, embed_dim: int,
                 units: int, n_layers: int, cell_type: str,
@@ -70,10 +67,8 @@ def build_model(vocab_size: int, feature_dim: int, embed_dim: int,
     cap_emb   = layers.Embedding(vocab_size, embed_dim,
                                  mask_zero=True, name='embedding')(dec_input)  # (B, T, E)
 
-    # Concatenate: [img_proj, cap_emb] → (B, T+1, E)
     x = layers.Concatenate(axis=1)([img_proj, cap_emb])
 
-    # Recurrent layers
     for i in range(n_layers):
         if cell_type == 'lstm':
             x = layers.LSTM(units, return_sequences=True,
@@ -82,17 +77,13 @@ def build_model(vocab_size: int, feature_dim: int, embed_dim: int,
             x = layers.SimpleRNN(units, return_sequences=True,
                                  activation='tanh', name=f'rnn_{i}')(x)
 
-    # Slice first max_len timesteps (remove the extra timestep from img_proj)
-    x = layers.Lambda(lambda t: t[:, :max_len, :], name='slice')(x)  # (B, T, U)
-
-    # Output projection
-    out = layers.Dense(vocab_size, activation='softmax', name='output')(x)  # (B, T, V)
+    x   = layers.Lambda(lambda t: t[:, :max_len, :], name='slice')(x)
+    out = layers.Dense(vocab_size, activation='softmax', name='output')(x)
 
     return keras.Model(inputs=[img_feat, dec_input], outputs=out,
                        name=f'cap_{cell_type}_l{n_layers}_u{units}')
 
 
-# ─── BLEU-4 evaluation ───────────────────────────────────────────────────────
 
 def greedy_decode_batch(model: keras.Model, img_feats: np.ndarray,
                         vocab: dict, id2word: dict, max_len: int,
@@ -108,12 +99,12 @@ def greedy_decode_batch(model: keras.Model, img_feats: np.ndarray,
         feats = img_feats[start:start + batch_size]
         B = len(feats)
         tokens = np.full((B, max_len), pad_id, dtype=np.int32)
-        tokens[:, 0] = start_id                                 # first token = <start>
+        tokens[:, 0] = start_id
         finished = np.zeros(B, dtype=bool)
 
         for t in range(max_len - 1):
-            preds = model.predict([feats, tokens], verbose=0)  # (B, max_len, vocab)
-            next_tok = preds[:, t, :].argmax(axis=-1)          # (B,)
+            preds    = model.predict([feats, tokens], verbose=0)
+            next_tok = preds[:, t, :].argmax(axis=-1)
             for b in range(B):
                 if not finished[b]:
                     tokens[b, t + 1] = next_tok[b]
@@ -124,7 +115,7 @@ def greedy_decode_batch(model: keras.Model, img_feats: np.ndarray,
 
         for b in range(B):
             words = []
-            for t in range(1, max_len):   # skip <start>
+            for t in range(1, max_len):
                 tok = tokens[b, t]
                 if tok in (end_id, pad_id):
                     break
@@ -142,12 +133,10 @@ def compute_bleu4(hypotheses: list, references: list) -> float:
                        smoothing_function=smooth)
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     print(f'TensorFlow {tf.__version__}')
 
-    # Load preprocessed data
     train_img, train_in, train_tgt = load_data('train')
     val_img,   val_in,   val_tgt   = load_data('val')
     test_img,  test_in,  test_tgt  = load_data('test')
@@ -164,7 +153,6 @@ def main():
     print(f'vocab_size={vocab_size}  feature_dim={feature_dim}  max_len={max_len}')
     print(f'train={len(train_img)}  val={len(val_img)}  test={len(test_img)}')
 
-    # Sample weights (mask padding positions in loss)
     def make_weights(targets):
         return (targets != pad_id).astype(np.float32)
 
@@ -206,12 +194,9 @@ def main():
         )
         train_time = time.time() - t0
 
-        # BLEU-4 on test set
         hyps  = greedy_decode_batch(model, test_img, vocab, id2word, max_len)
         with open(PROC_DIR / 'test_references.json') as f:
             ref_map = json.load(f)
-        test_imgs_order = []   # order guaranteed by preprocessor
-        # rebuild reference list aligned with test features
         refs_aligned = [[r.split() for r in ref_map.get(img, [''])]
                         for img in sorted(ref_map.keys())]
         bleu4 = compute_bleu4(hyps, refs_aligned)
@@ -234,7 +219,6 @@ def main():
             'n_params':    model.count_params(),
         })
 
-    # Summary
     summary_path = MODELS_DIR / 'captioning_results.json'
     with open(summary_path, 'w') as f:
         json.dump(results, f, indent=2)

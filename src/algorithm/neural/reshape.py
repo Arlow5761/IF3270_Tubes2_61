@@ -20,7 +20,6 @@ class Flatten(Diffable):
         return x.reshape(x.shape[0], -1)
 
     def _calculate_gradient(self, sources: dict, value: np.ndarray) -> dict:
-        # value = upstream gradient G, shape (N, flat_dim)
         x_node, x = next(iter(sources.items()))
         return {x_node: value.reshape(x.shape)}
 

@@ -82,7 +82,6 @@ class Model:
         if self.output is None:
             raise ValueError("Model must have an output registered")
 
-        # Assume the input Diffable allows setting its value (e.g., Input class)
         self.inputs[0]._value = x
         return self.output.get_value()
 
@@ -109,17 +108,12 @@ class Model:
             Loss value for this step.
         """
         output = self.forward(x)
-        
-        # Create criterion instance and attach it to the graph
         loss = criterion_class(self.output, y)
         loss_value = loss.get_value()
         self.loss_history.append(loss_value)
 
-        # Compute gradients and update parameters
         grads = [loss.get_gradient(param) for param in self.parameters]
         optimizer.step(self.parameters, grads)
-        
-        # Detach criterion from graph
         loss.detach()
         
         return loss_value

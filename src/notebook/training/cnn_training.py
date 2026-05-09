@@ -24,7 +24,6 @@ from tensorflow import keras
 from tensorflow.keras import layers
 from sklearn.metrics import f1_score
 
-# ─── Paths ────────────────────────────────────────────────────────────────────
 REPO_ROOT   = Path(__file__).resolve().parents[3]
 DATASET_DIR = REPO_ROOT / 'dataset'
 MODELS_DIR  = REPO_ROOT / 'models'
@@ -42,7 +41,6 @@ SEED       = 42
 
 CLASS_NAMES = ['buildings', 'forest', 'glacier', 'mountain', 'sea', 'street']
 
-# ─── Data loading (tf.data) ───────────────────────────────────────────────────
 
 def make_dataset(directory: Path, shuffle: bool = False) -> tf.data.Dataset:
     ds = tf.keras.preprocessing.image_dataset_from_directory(
@@ -60,7 +58,6 @@ def make_dataset(directory: Path, shuffle: bool = False) -> tf.data.Dataset:
              .prefetch(tf.data.AUTOTUNE)
 
 
-# ─── Model factory ────────────────────────────────────────────────────────────
 
 def build_model(n_blocks: int, filters: list, kernel_size: tuple,
                 pool_type: str) -> keras.Model:
@@ -89,9 +86,8 @@ def build_model(n_blocks: int, filters: list, kernel_size: tuple,
     return model
 
 
-# ─── Experiment grid ──────────────────────────────────────────────────────────
 
-# 2 × (num conv blocks)  × 2 × (filter sizes)  × 2 × (kernel sizes)  × 2 × (pool types) = 16
+# 2 blocks × 2 filter sizes × 2 kernel sizes × 2 pool types = 16 variants
 EXPERIMENTS = []
 for n_blocks, filters_key, kernel_size, pool_type in itertools.product(
     [2, 3],
@@ -117,7 +113,6 @@ for n_blocks, filters_key, kernel_size, pool_type in itertools.product(
 assert len(EXPERIMENTS) == 16, f"Expected 16 experiments, got {len(EXPERIMENTS)}"
 
 
-# ─── Evaluation helper ────────────────────────────────────────────────────────
 
 def evaluate_model(model: keras.Model, dataset: tf.data.Dataset) -> dict:
     y_true, y_pred = [], []
@@ -129,7 +124,6 @@ def evaluate_model(model: keras.Model, dataset: tf.data.Dataset) -> dict:
     return {'macro_f1': float(macro_f1), 'n_samples': len(y_true)}
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     print(f"TensorFlow {tf.__version__}  |  GPU: {tf.config.list_physical_devices('GPU')}")
@@ -194,13 +188,11 @@ def main():
         print(f"  val  macro-F1 = {val_metrics['macro_f1']:.4f}")
         print(f"  test macro-F1 = {test_metrics['macro_f1']:.4f}")
 
-    # Save summary
     summary_path = MODELS_DIR / 'training_results.json'
     with open(summary_path, 'w') as f:
         json.dump(results, f, indent=2)
     print(f"\nAll results saved to {summary_path}")
 
-    # Print ranking
     results_sorted = sorted(results, key=lambda r: r['test_macro_f1'], reverse=True)
     print("\n── Ranking by test macro F1 ──")
     for rank, r in enumerate(results_sorted, 1):

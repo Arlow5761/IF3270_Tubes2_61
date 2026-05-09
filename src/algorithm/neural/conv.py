@@ -5,18 +5,7 @@ from ..core.diffable import Diffable
 
 def _im2col(x: np.ndarray, kH: int, kW: int, sH: int, sW: int,
             out_H: int, out_W: int) -> np.ndarray:
-    """Extract sliding-window patches using the im2col approach.
-
-    Args:
-        x: Input of shape (N, H, W, C)
-        kH, kW: Kernel spatial dimensions
-        sH, sW: Stride values
-        out_H, out_W: Output spatial dimensions
-
-    Returns:
-        col: Shape (N, out_H, out_W, kH * kW * C), channel-last ordering
-             (rows→cols→channels) matching Keras kernel ordering.
-    """
+    """Extract sliding-window patches: (N,H,W,C) → (N,oH,oW,kH*kW*C), channel-last."""
     N, H, W, C = x.shape
     col = np.zeros((N, out_H, out_W, kH * kW * C), dtype=x.dtype)
     for i in range(kH):
@@ -29,7 +18,7 @@ def _im2col(x: np.ndarray, kH: int, kW: int, sH: int, sW: int,
 
 
 def _pad_input(x: np.ndarray, kH: int, kW: int, sH: int, sW: int) -> np.ndarray:
-    """Apply 'same' zero-padding so output spatial size = ceil(input / stride)."""
+    """'same' zero-padding: output spatial size = ceil(input / stride)."""
     N, H, W, C = x.shape
     out_H = int(np.ceil(H / sH))
     out_W = int(np.ceil(W / sW))
@@ -71,14 +60,12 @@ class Conv2D(Diffable):
         out_H = (H - kH) // sH + 1
         out_W = (W - kW) // sW + 1
 
-        col = _im2col(x, kH, kW, sH, sW, out_H, out_W)       # (N, oH, oW, kH*kW*Cin)
-        col_flat = col.reshape(N * out_H * out_W, kH * kW * C_in)
+        col         = _im2col(x, kH, kW, sH, sW, out_H, out_W)
+        col_flat    = col.reshape(N * out_H * out_W, kH * kW * C_in)
         kernel_flat = kernel.reshape(kH * kW * C_in, C_out)
-
-        out = col_flat @ kernel_flat + bias                    # (N*oH*oW, Cout)
+        out         = col_flat @ kernel_flat + bias
         return out.reshape(N, out_H, out_W, C_out)
 
     def _calculate_gradient(self, sources: dict, value: np.ndarray) -> dict:
-        # Gradient computation for Conv2D is non-trivial and not needed for
-        # inference-only from-scratch evaluation. Return zeros as placeholders.
+        # inference only; gradients not implemented
         return {node: np.zeros_like(val) for node, val in sources.items()}

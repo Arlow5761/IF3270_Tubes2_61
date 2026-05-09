@@ -37,13 +37,11 @@ IMG_SIZE    = (299, 299)  # InceptionV3 input
 MAX_LEN     = 35          # max caption length in tokens (excl. <start>/<end>)
 MIN_FREQ    = 2           # minimum word frequency to keep in vocabulary
 
-# ─── Special tokens ───────────────────────────────────────────────────────────
 PAD_TOKEN   = '<pad>'
 START_TOKEN = '<start>'
 END_TOKEN   = '<end>'
 UNK_TOKEN   = '<unk>'
 
-# ─── Caption loading ─────────────────────────────────────────────────────────
 
 def _clean(text: str) -> str:
     text = text.lower().strip()
@@ -54,7 +52,6 @@ def _clean(text: str) -> str:
 
 def load_captions(data_dir: Path) -> dict:
     """Return {image_filename: [caption, ...]} dict."""
-    # Try Kaggle CSV format first
     csv_path = data_dir / 'captions.txt'
     if csv_path.exists():
         captions = {}
@@ -71,7 +68,6 @@ def load_captions(data_dir: Path) -> dict:
                 captions.setdefault(img, []).append(_clean(cap))
         return captions
 
-    # Fallback: Flickr8k token format
     token_path = data_dir / 'Flickr8k.token.txt'
     if not token_path.exists():
         raise FileNotFoundError(
@@ -100,7 +96,6 @@ def load_split(data_dir: Path, split: str) -> list:
         return [ln.strip() for ln in f if ln.strip()]
 
 
-# ─── Feature extraction ───────────────────────────────────────────────────────
 
 def extract_features(img_dir: Path, img_names: list, batch_size: int = 32) -> dict:
     """Extract InceptionV3 features for a list of images.
@@ -138,7 +133,6 @@ def extract_features(img_dir: Path, img_names: list, batch_size: int = 32) -> di
     return features
 
 
-# ─── Vocabulary building ──────────────────────────────────────────────────────
 
 def build_vocabulary(captions: dict, train_imgs: list, min_freq: int = MIN_FREQ):
     """Build vocabulary from training captions only."""
@@ -154,7 +148,6 @@ def build_vocabulary(captions: dict, train_imgs: list, min_freq: int = MIN_FREQ)
     return vocab
 
 
-# ─── Caption encoding & padding ───────────────────────────────────────────────
 
 def encode_caption(caption: str, vocab: dict, max_len: int) -> tuple:
     """Encode caption to (decoder_input, decoder_target) integer arrays.
@@ -165,12 +158,10 @@ def encode_caption(caption: str, vocab: dict, max_len: int) -> tuple:
     words = caption.split()[:max_len - 1]  # reserve space for <end>
     token_ids = [vocab.get(w, vocab[UNK_TOKEN]) for w in words]
 
-    # decoder_input: [<start>] + token_ids, padded to max_len
     dec_in  = [vocab[START_TOKEN]] + token_ids
     dec_in  = dec_in[:max_len]
     dec_in  += [vocab[PAD_TOKEN]] * (max_len - len(dec_in))
 
-    # decoder_target: token_ids + [<end>], padded to max_len
     dec_tgt = token_ids + [vocab[END_TOKEN]]
     dec_tgt = dec_tgt[:max_len]
     dec_tgt += [vocab[PAD_TOKEN]] * (max_len - len(dec_tgt))
@@ -195,7 +186,6 @@ def prepare_dataset(features: dict, captions: dict, img_names: list,
             np.array(dec_tgts,   dtype=np.int32))
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     print('Loading captions …')
@@ -203,7 +193,6 @@ def main():
     print(f'  {len(captions)} unique images, '
           f'{sum(len(v) for v in captions.values())} total captions')
 
-    # Load splits (fall back to 6000/1000/1000 split if files are missing)
     try:
         train_imgs = load_split(DATA_DIR, 'train')
         val_imgs   = load_split(DATA_DIR, 'val')
@@ -222,7 +211,6 @@ def main():
 
     print(f'  splits: train={len(train_imgs)}, val={len(val_imgs)}, test={len(test_imgs)}')
 
-    # Feature extraction
     feat_path = PROC_DIR / 'image_features.pkl'
     if feat_path.exists():
         print('Loading cached image features …')
@@ -236,14 +224,12 @@ def main():
             pickle.dump(features, f)
         print(f'  Saved features for {len(features)} images → {feat_path}')
 
-    # Vocabulary
     vocab_path = PROC_DIR / 'vocab.json'
     vocab = build_vocabulary(captions, train_imgs)
     with open(vocab_path, 'w') as f:
         json.dump(vocab, f, indent=2)
     print(f'Vocabulary size: {len(vocab)}  (saved to {vocab_path})')
 
-    # Prepare datasets
     print('Encoding captions and preparing datasets …')
     for split, imgs in [('train', train_imgs), ('val', val_imgs), ('test', test_imgs)]:
         img_f, dec_in, dec_tgt = prepare_dataset(features, captions, imgs, vocab, MAX_LEN)
@@ -253,7 +239,6 @@ def main():
         print(f'  {split}: {len(img_f)} samples  shapes: '
               f'img={img_f.shape}, dec_in={dec_in.shape}, dec_tgt={dec_tgt.shape}')
 
-    # Save reference captions for BLEU evaluation (list of lists per image)
     ref_path = PROC_DIR / 'test_references.json'
     references = {img: captions[img] for img in test_imgs if img in captions}
     with open(ref_path, 'w') as f:
