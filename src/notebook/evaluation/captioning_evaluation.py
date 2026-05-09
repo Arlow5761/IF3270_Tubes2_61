@@ -1,23 +1,3 @@
-"""
-Image Captioning — From-Scratch Evaluation (IF3270 Tubes 2)
-============================================================
-Builds from-scratch RNN/LSTM decoders using Diffable nodes,
-generates captions with greedy decoding, and computes BLEU-4 + METEOR.
-
-Covers BAGIAN 4 & 5:
-  A. All 12 variants  → BLEU-4 + METEOR + execution time
-  B. Best Keras vs from-scratch (RNN and LSTM separately)
-  C. RNN vs LSTM qualitative analysis
-  D. Max caption length sweep (≥3 variations)
-
-Prerequisites:
-    python src/notebook/captioning_preprocessing.py
-    python src/notebook/captioning_training.py
-
-Run:
-    python src/notebook/captioning_evaluation.py
-"""
-
 import json
 import sys
 import time
@@ -25,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT  = Path(__file__).resolve().parents[2]
+REPO_ROOT  = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / 'src'))
 
 import tensorflow as tf
@@ -46,8 +26,6 @@ from algorithm.neural.concat    import Concatenate as ConcatNode
 PROC_DIR   = REPO_ROOT / 'data_processed'
 MODELS_DIR = REPO_ROOT / 'models_captioning'
 
-# ─── Tiny numpy utilities ────────────────────────────────────────────────────
-
 def _sigmoid(x):
     return np.where(x >= 0, 1.0 / (1.0 + np.exp(-x)), np.exp(x) / (1.0 + np.exp(x)))
 
@@ -58,14 +36,7 @@ def _softmax(x):
 def _relu(x):
     return np.maximum(0.0, x)
 
-
-# ─── From-scratch step-by-step decoder ───────────────────────────────────────
-
 class ScratchDecoder:
-    """Raw NumPy step-by-step caption generator (no Diffable graph needed).
-
-    Used for greedy decoding (the Diffable graph is static / teacher-forced).
-    """
 
     def __init__(self, cell_type: str, weights: dict, vocab: dict,
                  embed_dim: int, units_per_layer: list):
@@ -75,9 +46,7 @@ class ScratchDecoder:
         self.id2word   = {v: k for k, v in vocab.items()}
         self.embed_dim = embed_dim
         self.n_layers  = len(units_per_layer)
-        self.units     = units_per_layer    # list, one entry per layer
-
-    # ── Single-step helpers ──────────────────────────────────────────────────
+        self.units     = units_per_layer    
 
     def _rnn_step(self, x, h, layer_idx):
         W_x = self.w[f'rnn_{layer_idx}_Wx']
@@ -98,8 +67,6 @@ class ScratchDecoder:
         c   = f_t * c + i_t * g_t
         h   = o_t * np.tanh(c)
         return h, c
-
-    # ── Greedy caption generation ────────────────────────────────────────────
 
     def generate(self, img_feat: np.ndarray, max_len: int = 35) -> list:
         """Generate a caption for a single image feature vector.
@@ -146,9 +113,6 @@ class ScratchDecoder:
 
         return [self.id2word.get(t, '<unk>') for t in tokens]
 
-
-# ─── Weight extraction from Keras model ──────────────────────────────────────
-
 def extract_weights(keras_model: keras.Model, cell_type: str, n_layers: int) -> dict:
     weights = {}
     for layer in keras_model.layers:
@@ -169,9 +133,6 @@ def extract_weights(keras_model: keras.Model, cell_type: str, n_layers: int) -> 
             idx = int(name.split('_')[1])
             weights[f'rnn_{idx}_Wx'], weights[f'rnn_{idx}_Wh'], weights[f'rnn_{idx}_b'] = lw
     return weights
-
-
-# ─── Diffable batch forward pass (consistency check) ─────────────────────────
 
 def build_diffable_decoder(weights: dict, cell_type: str, n_layers: int,
                            units_list: list, max_len: int, vocab_size: int):
@@ -221,9 +182,6 @@ def build_diffable_decoder(weights: dict, cell_type: str, n_layers: int,
 
     return img_inp, cap_inp, out
 
-
-# ── Small helper nodes for the Diffable graph ────────────────────────────────
-
 class _ExpandDim(Diffable):
     """Unsqueeze axis=1: (N, D) → (N, 1, D)."""
     def __init__(self, x: Diffable):
@@ -269,9 +227,6 @@ class _SeqLinear(Diffable):
         return {x_n: v @ W.T,
                 W_n: x.reshape(-1, x.shape[-1]).T @ v.reshape(-1, v.shape[-1]),
                 b_n: v.reshape(-1, v.shape[-1]).sum(axis=0)}
-
-
-# ─── Evaluation helpers ───────────────────────────────────────────────────────
 
 def evaluate_corpus(hypotheses: list, ref_map: dict, img_order: list) -> dict:
     """Compute BLEU-4 and METEOR for a list of hypotheses."""

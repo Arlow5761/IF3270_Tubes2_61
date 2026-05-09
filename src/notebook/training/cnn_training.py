@@ -25,7 +25,7 @@ from tensorflow.keras import layers
 from sklearn.metrics import f1_score
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
-REPO_ROOT   = Path(__file__).resolve().parents[2]
+REPO_ROOT   = Path(__file__).resolve().parents[3]
 DATASET_DIR = REPO_ROOT / 'dataset'
 MODELS_DIR  = REPO_ROOT / 'models'
 MODELS_DIR.mkdir(exist_ok=True)

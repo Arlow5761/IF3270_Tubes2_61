@@ -21,7 +21,7 @@ from tensorflow import keras
 from tensorflow.keras import layers
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 
-REPO_ROOT  = Path(__file__).resolve().parents[2]
+REPO_ROOT  = Path(__file__).resolve().parents[3]
 PROC_DIR   = REPO_ROOT / 'data_processed'
 MODELS_DIR = REPO_ROOT / 'models_captioning'
 MODELS_DIR.mkdir(exist_ok=True)

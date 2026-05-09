@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 from sklearn.metrics import f1_score, classification_report
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / 'src'))
 
 import tensorflow as tf

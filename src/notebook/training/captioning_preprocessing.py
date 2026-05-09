@@ -26,7 +26,7 @@ from collections import Counter
 import numpy as np
 from PIL import Image
 
-REPO_ROOT   = Path(__file__).resolve().parents[2]
+REPO_ROOT   = Path(__file__).resolve().parents[3]
 DATA_DIR    = REPO_ROOT / 'dataset' / 'flickr8k'
 PROC_DIR    = REPO_ROOT / 'data_processed'
 PROC_DIR.mkdir(exist_ok=True)
