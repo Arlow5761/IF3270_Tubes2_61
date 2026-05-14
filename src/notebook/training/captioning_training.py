@@ -14,6 +14,7 @@ import json
 import time
 import itertools
 from pathlib import Path
+import pickle
 
 import numpy as np
 import tensorflow as tf
@@ -21,7 +22,7 @@ from tensorflow import keras
 from tensorflow.keras import layers
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 
-REPO_ROOT  = Path(__file__).resolve().parents[3]
+REPO_ROOT  = Path.cwd()
 PROC_DIR   = REPO_ROOT / 'data_processed'
 MODELS_DIR = REPO_ROOT / 'models_captioning'
 MODELS_DIR.mkdir(exist_ok=True)
@@ -125,6 +126,7 @@ def greedy_decode_batch(model: keras.Model, img_feats: np.ndarray,
     return all_captions
 
 
+
 def compute_bleu4(hypotheses: list, references: list) -> float:
     """Compute corpus BLEU-4.  references: list of list-of-lists (multiple refs/image)."""
     smooth = SmoothingFunction().method1
@@ -133,13 +135,11 @@ def compute_bleu4(hypotheses: list, references: list) -> float:
                        smoothing_function=smooth)
 
 
-
 def main():
     print(f'TensorFlow {tf.__version__}')
 
     train_img, train_in, train_tgt = load_data('train')
     val_img,   val_in,   val_tgt   = load_data('val')
-    test_img,  test_in,  test_tgt  = load_data('test')
 
     feature_dim = train_img.shape[1]
     max_len     = train_in.shape[1]
@@ -151,13 +151,36 @@ def main():
     pad_id     = vocab['<pad>']
 
     print(f'vocab_size={vocab_size}  feature_dim={feature_dim}  max_len={max_len}')
-    print(f'train={len(train_img)}  val={len(val_img)}  test={len(test_img)}')
 
     def make_weights(targets):
         return (targets != pad_id).astype(np.float32)
 
     train_w = make_weights(train_tgt)
     val_w   = make_weights(val_tgt)
+
+    # Load all unique image features from preprocessing step
+    with open(PROC_DIR / 'image_features.pkl', 'rb') as f:
+        all_image_features = pickle.load(f)
+
+    # Load test references to get unique test image names and their captions
+    ref_path = PROC_DIR / 'test_references.json'
+    with open(ref_path) as f:
+        ref_map = json.load(f)
+
+    # Get the unique test image names in a sorted order from references
+    unique_test_image_names_from_refs = sorted(ref_map.keys())
+
+    # Prepare image features for greedy decoding for these unique test images
+    # Filter to ensure only images with extracted features are considered for BLEU calculation.
+    test_img_for_bleu = []
+    filtered_unique_test_image_names = []
+    for img_name in unique_test_image_names_from_refs:
+        if img_name in all_image_features: # Check if feature exists for this image
+            test_img_for_bleu.append(all_image_features[img_name])
+            filtered_unique_test_image_names.append(img_name)
+    test_img_for_bleu = np.array(test_img_for_bleu)
+
+    print(f'train={len(train_img)}  val={len(val_img)}  test_unique_images_for_bleu={len(test_img_for_bleu)}')
 
     results = []
 
@@ -172,7 +195,6 @@ def main():
         model.compile(
             optimizer = keras.optimizers.Adam(LEARNING_RATE),
             loss      = keras.losses.SparseCategoricalCrossentropy(),
-            sample_weight_mode = 'temporal',
         )
         model.summary(print_fn=lambda s: None)
 
@@ -194,11 +216,13 @@ def main():
         )
         train_time = time.time() - t0
 
-        hyps  = greedy_decode_batch(model, test_img, vocab, id2word, max_len)
-        with open(PROC_DIR / 'test_references.json') as f:
-            ref_map = json.load(f)
+        # Generate hypotheses for the unique test images
+        hyps  = greedy_decode_batch(model, test_img_for_bleu, vocab, id2word, max_len)
+
+        # Prepare references for these same unique test images, ensuring order matches
         refs_aligned = [[r.split() for r in ref_map.get(img, [''])]
-                        for img in sorted(ref_map.keys())]
+                        for img in filtered_unique_test_image_names]
+
         bleu4 = compute_bleu4(hyps, refs_aligned)
 
         print(f'  test BLEU-4 = {bleu4:.4f}   train_time = {train_time:.0f}s')

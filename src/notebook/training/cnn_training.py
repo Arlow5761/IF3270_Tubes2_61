@@ -5,7 +5,7 @@ Trains 16 CNN architecture variants and saves each model.
 Run from the repo root:
     python src/notebook/cnn_training.py
 
-Dataset expected at:  dataset/
+Dataset expected at:  dataset/intel-image-classification
   dataset/train/   → sub-folders per class
   dataset/val/     → sub-folders per class
   dataset/test/    → sub-folders per class (or a flat test set)
@@ -25,7 +25,7 @@ from tensorflow.keras import layers
 from sklearn.metrics import f1_score
 
 REPO_ROOT   = Path(__file__).resolve().parents[3]
-DATASET_DIR = REPO_ROOT / 'dataset'
+DATASET_DIR = REPO_ROOT / 'dataset' / 'intel-image-classification'
 MODELS_DIR  = REPO_ROOT / 'models'
 MODELS_DIR.mkdir(exist_ok=True)
 
