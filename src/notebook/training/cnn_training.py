@@ -58,17 +58,9 @@ def make_dataset(directory: Path, shuffle: bool = False) -> tf.data.Dataset:
              .prefetch(tf.data.AUTOTUNE)
 
 
-
 def build_model(n_blocks: int, filters: list, kernel_size: tuple,
                 pool_type: str) -> keras.Model:
-    """Build a CNN with `n_blocks` conv-pool blocks.
-
-    Args:
-        n_blocks:    Number of Conv+Pool blocks (2 or 3).
-        filters:     List of filter counts, one per block.
-        kernel_size: (height, width) of conv kernels.
-        pool_type:   'max' or 'avg'.
-    """
+    """Build a standard CNN with `n_blocks` conv-pool blocks."""
     assert len(filters) == n_blocks, "filters list length must equal n_blocks"
     pool_layer = layers.MaxPooling2D if pool_type == 'max' else layers.AveragePooling2D
 
@@ -85,6 +77,35 @@ def build_model(n_blocks: int, filters: list, kernel_size: tuple,
     model.add(layers.Dense(N_CLASSES, activation='softmax'))
     return model
 
+
+def build_locally_connected_model(n_blocks: int, filters: list, kernel_size: tuple,
+                                  pool_type: str) -> keras.Model:
+    """Build a CNN replacing Conv2D with LocallyConnected2D using manual padding."""
+    assert len(filters) == n_blocks, "filters list length must equal n_blocks"
+    pool_layer = layers.MaxPooling2D if pool_type == 'max' else layers.AveragePooling2D
+
+    model = keras.Sequential(name=f"lc_b{n_blocks}_k{kernel_size[0]}_p{pool_type}_padded")
+    model.add(layers.Input(shape=(*IMG_SIZE, 3)))
+
+    # Calculate symmetrical padding required to simulate padding='same'
+    pad_h = (kernel_size[0] - 1) // 2
+    pad_w = (kernel_size[1] - 1) // 2
+
+    for i in range(n_blocks):
+        # 1. Apply manual ZeroPadding to the spatial dimensions
+        model.add(layers.ZeroPadding2D(padding=(pad_h, pad_w)))
+        
+        # 2. Apply LocallyConnected2D with padding='valid'
+        model.add(layers.LocallyConnected2D(filters[i], kernel_size, padding='valid', activation='relu'))
+        
+        # 3. Apply Pooling
+        model.add(pool_layer(pool_size=(2, 2), strides=(2, 2)))
+
+    model.add(layers.Flatten())
+    model.add(layers.Dense(128, activation='relu'))
+    model.add(layers.Dropout(0.5))
+    model.add(layers.Dense(N_CLASSES, activation='softmax'))
+    return model
 
 
 # 2 blocks × 2 filter sizes × 2 kernel sizes × 2 pool types = 16 variants
@@ -113,7 +134,6 @@ for n_blocks, filters_key, kernel_size, pool_type in itertools.product(
 assert len(EXPERIMENTS) == 16, f"Expected 16 experiments, got {len(EXPERIMENTS)}"
 
 
-
 def evaluate_model(model: keras.Model, dataset: tf.data.Dataset) -> dict:
     y_true, y_pred = [], []
     for xb, yb in dataset:
@@ -122,7 +142,6 @@ def evaluate_model(model: keras.Model, dataset: tf.data.Dataset) -> dict:
         y_true.extend(yb.numpy().tolist())
     macro_f1 = f1_score(y_true, y_pred, average='macro')
     return {'macro_f1': float(macro_f1), 'n_samples': len(y_true)}
-
 
 
 def main():
@@ -134,6 +153,9 @@ def main():
 
     results = []
 
+    # ---------------------------------------------------------
+    # Train Standard CNN Variants
+    # ---------------------------------------------------------
     for idx, cfg in enumerate(EXPERIMENTS, 1):
         tag = (f"b{cfg['n_blocks']}_f{cfg['filters_key']}"
                f"_k{cfg['kernel_size'][0]}_p{cfg['pool_type']}")
@@ -201,6 +223,54 @@ def main():
     best = results_sorted[0]
     print(f"\nBest model: {best['tag']}  (test macro-F1 = {best['test_macro_f1']:.4f})")
     print(f"Saved at:   {best['saved_to']}")
+
+    # ---------------------------------------------------------
+    # Train Locally Connected Version of the Best Model
+    # ---------------------------------------------------------
+    print("\n── Training Locally Connected Version of Best Model ──")
+    best_cfg = best['config']
+    
+    print(f"Building Locally Connected model based on config: {best['tag']}")
+    
+    lc_model = build_locally_connected_model(
+        n_blocks    = best_cfg['n_blocks'],
+        filters     = best_cfg['filters'],
+        kernel_size = tuple(best_cfg['kernel_size']),
+        pool_type   = best_cfg['pool_type'],
+    )
+    
+    lc_model.compile(
+        optimizer = keras.optimizers.Adam(learning_rate=1e-3),
+        loss      = keras.losses.SparseCategoricalCrossentropy(),
+        metrics   = ['accuracy'],
+    )
+    
+    # Print summary to show the parameter explosion typical of LocallyConnected2D
+    lc_model.summary()
+
+    lc_history = lc_model.fit(
+        train_ds,
+        validation_data = val_ds,
+        epochs          = EPOCHS,
+        callbacks       = [
+            keras.callbacks.EarlyStopping(
+                monitor='val_loss', patience=5, restore_best_weights=True),
+            keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6),
+        ],
+        verbose=1,
+    )
+
+    lc_val_metrics  = evaluate_model(lc_model, val_ds)
+    lc_test_metrics = evaluate_model(lc_model, test_ds)
+
+    lc_tag = "lc_" + best['tag']
+    lc_save_path = MODELS_DIR / f'model_{lc_tag}.keras'
+    lc_model.save(str(lc_save_path))
+
+    print(f"\n[Locally Connected] val  macro-F1 = {lc_val_metrics['macro_f1']:.4f}")
+    print(f"[Locally Connected] test macro-F1 = {lc_test_metrics['macro_f1']:.4f}")
+    print(f"Locally connected model saved at: {lc_save_path}")
 
 
 if __name__ == '__main__':
