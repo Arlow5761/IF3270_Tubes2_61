@@ -41,17 +41,24 @@ def _softmax(x):
 def _relu(x):
     return np.maximum(0.0, x)
 
+def _log_softmax(x):
+    m = x.max()
+    return x - m - np.log(np.sum(np.exp(x - m)))
+
+
 class ScratchDecoder:
 
     def __init__(self, cell_type: str, weights: dict, vocab: dict,
-                 embed_dim: int, units_per_layer: list):
-        self.cell_type = cell_type          # 'rnn' or 'lstm'
-        self.w         = weights
-        self.vocab     = vocab
-        self.id2word   = {v: k for k, v in vocab.items()}
-        self.embed_dim = embed_dim
-        self.n_layers  = len(units_per_layer)
-        self.units     = units_per_layer    
+                 embed_dim: int, units_per_layer: list,
+                 inject_mode: str = 'pre'):
+        self.cell_type   = cell_type        # 'rnn' or 'lstm'
+        self.inject_mode = inject_mode      # 'pre' or 'init'
+        self.w           = weights
+        self.vocab       = vocab
+        self.id2word     = {v: k for k, v in vocab.items()}
+        self.embed_dim   = embed_dim
+        self.n_layers    = len(units_per_layer)
+        self.units       = units_per_layer
 
     def _rnn_step(self, x, h, layer_idx):
         W_x = self.w[f'rnn_{layer_idx}_Wx']
@@ -73,41 +80,131 @@ class ScratchDecoder:
         h   = o_t * np.tanh(c)
         return h, c
 
-    def generate(self, img_feat: np.ndarray, max_len: int = 35) -> list:
-        img_proj = _relu(img_feat @ self.w['img_proj_W'] + self.w['img_proj_b'])
+    def _step(self, x, hs, cs):
+        """Advance the recurrent stack by one timestep (returns new hs, cs and top output)."""
+        new_hs = [h.copy() for h in hs]
+        new_cs = [c.copy() for c in cs]
+        cur = x
+        for li in range(self.n_layers):
+            if self.cell_type == 'rnn':
+                new_hs[li] = self._rnn_step(cur, new_hs[li], li)
+            else:
+                new_hs[li], new_cs[li] = self._lstm_step(cur, new_hs[li], new_cs[li], li)
+            cur = new_hs[li]
+        return cur, new_hs, new_cs
 
+    def _init_states(self, img_feat: np.ndarray):
+        """Initialise (hs, cs) according to inject_mode. For 'pre', also prime
+        the stack by feeding the projected image so the next input is <start>."""
         hs = [np.zeros(u) for u in self.units]
         cs = [np.zeros(u) for u in self.units]
+
+        if self.inject_mode == 'init':
+            h_init = np.tanh(img_feat @ self.w['h_init_W'] + self.w['h_init_b'])
+            hs[0] = h_init
+            if self.cell_type == 'lstm':
+                cs[0] = np.tanh(img_feat @ self.w['c_init_W'] + self.w['c_init_b'])
+        else:
+            img_proj = _relu(img_feat @ self.w['img_proj_W'] + self.w['img_proj_b'])
+            _, hs, cs = self._step(img_proj, hs, cs)
+        return hs, cs
+
+    def generate(self, img_feat: np.ndarray, max_len: int = 35) -> list:
+        """Greedy decoder."""
+        hs, cs = self._init_states(img_feat)
 
         start_id = self.vocab['<start>']
         end_id   = self.vocab['<end>']
         pad_id   = self.vocab['<pad>']
         E        = self.w['embedding']
 
-        def _step(x_in):
-            cur = x_in
-            for li in range(self.n_layers):
-                if self.cell_type == 'rnn':
-                    hs[li] = self._rnn_step(cur, hs[li], li)
-                else:
-                    hs[li], cs[li] = self._lstm_step(cur, hs[li], cs[li], li)
-                cur = hs[li]
-            return cur
-
-        # prime the recurrent stack with the image, then <start>
-        _step(img_proj)
-        x_t = _step(E[start_id])
-
+        x_t = E[start_id]
         tokens = []
         for _ in range(max_len):
-            logits = x_t @ self.w['output_W'] + self.w['output_b']
+            out, hs, cs = self._step(x_t, hs, cs)
+            logits = out @ self.w['output_W'] + self.w['output_b']
             tok    = int(np.argmax(_softmax(logits)))
             if tok == end_id or tok == pad_id:
                 break
             tokens.append(tok)
-            x_t = _step(E[tok])
+            x_t = E[tok]
 
         return [self.id2word.get(t, '<unk>') for t in tokens]
+
+    def generate_beam(self, img_feat: np.ndarray, max_len: int = 35,
+                      beam_size: int = 5, length_norm: float = 0.7) -> list:
+        """Beam search decoder. Returns the best caption as list of word strings.
+
+        At each step, expands every active beam by the top `beam_size` tokens,
+        scores each candidate by log-probability sum, then keeps the top
+        `beam_size` across all candidates (length-normalized).
+        """
+        start_id = self.vocab['<start>']
+        end_id   = self.vocab['<end>']
+        pad_id   = self.vocab['<pad>']
+        E        = self.w['embedding']
+
+        hs0, cs0 = self._init_states(img_feat)
+
+        # First expansion from <start>
+        out, hs0, cs0 = self._step(E[start_id], hs0, cs0)
+        logits     = out @ self.w['output_W'] + self.w['output_b']
+        logp       = _log_softmax(logits)
+        vocab_size = self.w['output_b'].shape[0]
+        k0         = min(beam_size, vocab_size)
+        topk       = np.argpartition(-logp, k0 - 1)[:k0]
+
+        # beam tuple: (cum_log_prob, tokens, hs, cs)
+        beams = [(float(logp[t]), [int(t)], hs0, cs0) for t in topk]
+        done  = []
+
+        def norm_score(score, toks):
+            return score / (max(len(toks), 1) ** length_norm)
+
+        for _ in range(max_len - 1):
+            active = []
+            for score, toks, hs_b, cs_b in beams:
+                if toks[-1] == end_id or toks[-1] == pad_id:
+                    done.append((score, toks))
+                else:
+                    active.append((score, toks, hs_b, cs_b))
+            if not active:
+                beams = []  # nothing left to extend; avoid double-adding at the end
+                break
+
+            vocab_size = self.w['output_b'].shape[0]
+            k          = min(beam_size, vocab_size)
+            candidates = []
+            for score, toks, hs_b, cs_b in active:
+                out, new_hs, new_cs = self._step(E[toks[-1]], hs_b, cs_b)
+                logits = out @ self.w['output_W'] + self.w['output_b']
+                logp   = _log_softmax(logits)
+                topk   = np.argpartition(-logp, k - 1)[:k]
+                for t in topk:
+                    candidates.append(
+                        (score + float(logp[t]), toks + [int(t)], new_hs, new_cs)
+                    )
+
+            candidates.sort(key=lambda c: norm_score(c[0], c[1]), reverse=True)
+            beams = candidates[:beam_size]
+
+        # carry over any still-active beams at max_len (no double-add: see break above)
+        for score, toks, _, _ in beams:
+            done.append((score, toks))
+
+        best_score = -float('inf')
+        best_toks  = []
+        for score, toks in done:
+            s = norm_score(score, toks)
+            if s > best_score:
+                best_score, best_toks = s, toks
+
+        out_tokens = []
+        for t in best_toks:
+            if t == end_id or t == pad_id:
+                break
+            out_tokens.append(t)
+        return [self.id2word.get(t, '<unk>') for t in out_tokens]
 
 def extract_weights(keras_model: keras.Model, cell_type: str, n_layers: int) -> dict:
     weights = {}
@@ -118,6 +215,10 @@ def extract_weights(keras_model: keras.Model, cell_type: str, n_layers: int) -> 
             continue
         if name == 'img_proj':
             weights['img_proj_W'], weights['img_proj_b'] = lw
+        elif name == 'h_init':
+            weights['h_init_W'], weights['h_init_b'] = lw
+        elif name == 'c_init':
+            weights['c_init_W'], weights['c_init_b'] = lw
         elif name == 'embedding':
             weights['embedding'] = lw[0]
         elif name == 'output':
@@ -264,16 +365,20 @@ def main():
     print('─' * 60)
 
     scratch_results = []
-    for r in sorted(train_results, key=lambda x: (x['cell_type'], x['n_layers'], x['units'])):
-        tag        = r['tag']
-        cell_type  = r['cell_type']
-        n_layers   = r['n_layers']
-        units      = r['units']
+    for r in sorted(train_results,
+                    key=lambda x: (x.get('inject_mode', 'pre'), x['cell_type'],
+                                   x['n_layers'], x['units'])):
+        tag         = r['tag']
+        cell_type   = r['cell_type']
+        n_layers    = r['n_layers']
+        units       = r['units']
+        inject_mode = r.get('inject_mode', 'pre')
 
         keras_model = keras.models.load_model(MODELS_DIR / r['saved_to'])
         weights     = extract_weights(keras_model, cell_type, n_layers)
         units_list  = [units] * n_layers
-        decoder     = ScratchDecoder(cell_type, weights, vocab, embed_dim, units_list)
+        decoder     = ScratchDecoder(cell_type, weights, vocab, embed_dim, units_list,
+                                     inject_mode=inject_mode)
 
         t0   = time.time()
         hyps = [decoder.generate(test_img[i], max_len) for i in range(len(test_img))]
@@ -282,7 +387,8 @@ def main():
         metrics = evaluate_corpus(hyps, ref_map, test_imgs_order)
         print(f'  {tag:<26}  {metrics["bleu4"]:>7.4f}  '
               f'{metrics["meteor"]:>7.4f}  {dt:>8.1f}')
-        scratch_results.append({'tag': tag, 'cell_type': cell_type,
+        scratch_results.append({'tag': tag, 'inject_mode': inject_mode,
+                                'cell_type': cell_type,
                                 'n_layers': n_layers, 'units': units,
                                 **metrics, 'scratch_time': dt,
                                 'keras_bleu4': r['test_bleu4']})
@@ -315,9 +421,11 @@ def main():
     lstm_w = extract_weights(lstm_model, 'lstm', best_lstm['n_layers'])
 
     rnn_dec  = ScratchDecoder('rnn',  rnn_w,  vocab, embed_dim,
-                              [best_rnn['units']]  * best_rnn['n_layers'])
+                              [best_rnn['units']]  * best_rnn['n_layers'],
+                              inject_mode=best_rnn.get('inject_mode', 'pre'))
     lstm_dec = ScratchDecoder('lstm', lstm_w, vocab, embed_dim,
-                              [best_lstm['units']] * best_lstm['n_layers'])
+                              [best_lstm['units']] * best_lstm['n_layers'],
+                              inject_mode=best_lstm.get('inject_mode', 'pre'))
 
     print(f'\n  {"#":<4}  {"RNN caption":<45}  {"LSTM caption"}')
     print('  ' + '─' * 100)
@@ -341,7 +449,8 @@ def main():
                                               if r['tag'] == tag_best))
     weights_best = extract_weights(model_best, cell_best, n_layers_best)
     dec_best = ScratchDecoder(cell_best, weights_best, vocab, embed_dim,
-                              [units_best] * n_layers_best)
+                              [units_best] * n_layers_best,
+                              inject_mode=best_overall.get('inject_mode', 'pre'))
 
     print(f'  Best model: {tag_best}')
     print(f'  {"max_len":<10}  {"BLEU-4":>7}  {"METEOR":>7}')
@@ -351,6 +460,25 @@ def main():
         hyps_ml = [dec_best.generate(test_img[i], ml) for i in range(len(test_img))]
         m = evaluate_corpus(hyps_ml, ref_map, test_imgs_order)
         print(f'  {ml:<10}  {m["bleu4"]:>7.4f}  {m["meteor"]:>7.4f}')
+
+    print('\n══ E. Beam search vs Greedy (best model) ══')
+    print(f'  Model: {tag_best}')
+    print(f'  {"decoder":<14}  {"BLEU-4":>7}  {"METEOR":>7}  {"time(s)":>8}')
+    print('  ' + '─' * 45)
+
+    t0 = time.time()
+    hyps_g = [dec_best.generate(test_img[i], max_len) for i in range(len(test_img))]
+    dt_g   = time.time() - t0
+    m_g    = evaluate_corpus(hyps_g, ref_map, test_imgs_order)
+    print(f'  {"greedy":<14}  {m_g["bleu4"]:>7.4f}  {m_g["meteor"]:>7.4f}  {dt_g:>8.1f}')
+
+    for bw in [3, 5]:
+        t0 = time.time()
+        hyps_b = [dec_best.generate_beam(test_img[i], max_len, beam_size=bw)
+                  for i in range(len(test_img))]
+        dt_b   = time.time() - t0
+        m_b    = evaluate_corpus(hyps_b, ref_map, test_imgs_order)
+        print(f'  {f"beam={bw}":<14}  {m_b["bleu4"]:>7.4f}  {m_b["meteor"]:>7.4f}  {dt_b:>8.1f}')
 
     print('\n══ Final Summary ══')
     print(f'{"Tag":<28}  {"Scratch BLEU4":>13}  {"Keras BLEU4":>11}  {"METEOR":>7}  {"time(s)":>8}')
