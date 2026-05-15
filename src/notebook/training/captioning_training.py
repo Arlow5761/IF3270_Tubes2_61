@@ -78,7 +78,9 @@ def build_model(vocab_size: int, feature_dim: int, embed_dim: int,
             x = layers.SimpleRNN(units, return_sequences=True,
                                  activation='tanh', name=f'rnn_{i}')(x)
 
-    x   = layers.Lambda(lambda t: t[:, :max_len, :], name='slice')(x)
+    # drop the image timestep; output[t] = state after seeing img + dec_input[0..t]
+    # so output[t] predicts dec_target[t] given the correct history
+    x   = layers.Lambda(lambda t: t[:, 1:max_len + 1, :], name='slice')(x)
     out = layers.Dense(vocab_size, activation='softmax', name='output')(x)
 
     return keras.Model(inputs=[img_feat, dec_input], outputs=out,

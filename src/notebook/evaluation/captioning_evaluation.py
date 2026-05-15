@@ -1,12 +1,17 @@
 import json
 import sys
 import time
+import pickle
 from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT  = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO_ROOT / 'src'))
+REPO_ROOT = Path("/content/IF3270_Tubes2_61")
+# REPO_ROOT  = Path(__file__).resolve().parents[3]
+# sys.path.insert(0, str(REPO_ROOT / 'src'))
+
+import nltk
+nltk.download('wordnet')
 
 import tensorflow as tf
 from tensorflow import keras
@@ -69,43 +74,38 @@ class ScratchDecoder:
         return h, c
 
     def generate(self, img_feat: np.ndarray, max_len: int = 35) -> list:
-        """Generate a caption for a single image feature vector.
-
-        Args:
-            img_feat: (feature_dim,) — CNN feature for one image.
-            max_len:  maximum number of tokens to generate.
-
-        Returns:
-            List of word strings (without <start>/<end>).
-        """
         img_proj = _relu(img_feat @ self.w['img_proj_W'] + self.w['img_proj_b'])
 
         hs = [np.zeros(u) for u in self.units]
         cs = [np.zeros(u) for u in self.units]
 
-        x_t    = img_proj
-        tokens = []
-        end_id = self.vocab['<end>']
-        pad_id = self.vocab['<pad>']
-        E      = self.w['embedding']
+        start_id = self.vocab['<start>']
+        end_id   = self.vocab['<end>']
+        pad_id   = self.vocab['<pad>']
+        E        = self.w['embedding']
 
-        for _ in range(max_len):
+        def _step(x_in):
+            cur = x_in
             for li in range(self.n_layers):
                 if self.cell_type == 'rnn':
-                    hs[li] = self._rnn_step(x_t, hs[li], li)
-                    x_t = hs[li]
+                    hs[li] = self._rnn_step(cur, hs[li], li)
                 else:
-                    hs[li], cs[li] = self._lstm_step(x_t, hs[li], cs[li], li)
-                    x_t = hs[li]
+                    hs[li], cs[li] = self._lstm_step(cur, hs[li], cs[li], li)
+                cur = hs[li]
+            return cur
 
+        # prime the recurrent stack with the image, then <start>
+        _step(img_proj)
+        x_t = _step(E[start_id])
+
+        tokens = []
+        for _ in range(max_len):
             logits = x_t @ self.w['output_W'] + self.w['output_b']
-            probs  = _softmax(logits)
-            tok    = int(np.argmax(probs))
-
+            tok    = int(np.argmax(_softmax(logits)))
             if tok == end_id or tok == pad_id:
                 break
             tokens.append(tok)
-            x_t = E[tok]
+            x_t = _step(E[tok])
 
         return [self.id2word.get(t, '<unk>') for t in tokens]
 
@@ -132,10 +132,6 @@ def extract_weights(keras_model: keras.Model, cell_type: str, n_layers: int) -> 
 
 def build_diffable_decoder(weights: dict, cell_type: str, n_layers: int,
                            units_list: list, max_len: int, vocab_size: int):
-    """Build a Diffable graph for one forward pass (teacher forcing, batch mode).
-
-    Returns (img_inp, cap_inp, output_node).
-    """
     img_inp = Input()
     cap_inp = Input()
 
@@ -161,7 +157,7 @@ def build_diffable_decoder(weights: dict, cell_type: str, n_layers: int,
             b  = Parameter(weights[f'rnn_{li}_b'])
             x  = SimpleRNN(x, Wx, Wh, b, return_sequences=True)
 
-    x_sliced = _SliceSeq(x, max_len)
+    x_sliced = _SliceSeq(x, max_len, start=1)
 
     W_out = Parameter(weights['output_W'])
     b_out = Parameter(weights['output_b'])
@@ -170,7 +166,6 @@ def build_diffable_decoder(weights: dict, cell_type: str, n_layers: int,
     return img_inp, cap_inp, out
 
 class _ExpandDim(Diffable):
-    """Unsqueeze axis=1: (N, D) → (N, 1, D)."""
     def __init__(self, x: Diffable):
         super().__init__(x)
 
@@ -182,25 +177,24 @@ class _ExpandDim(Diffable):
 
 
 class _SliceSeq(Diffable):
-    """Slice first `length` timesteps: (N, T+1, U) → (N, T, U)."""
     _warn_on_unmanaged_state = False
 
-    def __init__(self, x: Diffable, length: int):
-        self._len = length
+    def __init__(self, x: Diffable, length: int, start: int = 0):
+        self._start = start
+        self._len   = length
         super().__init__(x)
 
     def _calculate_value(self, s: dict) -> np.ndarray:
-        return list(s.values())[0][:, :self._len, :]
+        return list(s.values())[0][:, self._start:self._start + self._len, :]
 
     def _calculate_gradient(self, s: dict, v: np.ndarray) -> dict:
         k, x = next(iter(s.items()))
         g = np.zeros_like(x)
-        g[:, :self._len, :] = v
+        g[:, self._start:self._start + self._len, :] = v
         return {k: g}
 
 
 class _SeqLinear(Diffable):
-    """Dense applied to every timestep: (N, T, in) @ (in, out) + (out,) → (N, T, out)."""
     def __init__(self, x: Diffable, W: Diffable, b: Diffable):
         super().__init__(x, W, b)
 
@@ -216,7 +210,6 @@ class _SeqLinear(Diffable):
                 b_n: v.reshape(-1, v.shape[-1]).sum(axis=0)}
 
 def evaluate_corpus(hypotheses: list, ref_map: dict, img_order: list) -> dict:
-    """Compute BLEU-4 and METEOR for a list of hypotheses."""
     smooth = SmoothingFunction().method1
 
     refs_for_bleu = [[r.split() for r in ref_map.get(img, ['a'])]
@@ -236,14 +229,29 @@ def evaluate_corpus(hypotheses: list, ref_map: dict, img_order: list) -> dict:
 
 
 def main():
-    test_img = np.load(PROC_DIR / 'test_img_feats.npy')
+    keras.config.enable_unsafe_deserialization()
 
     with open(PROC_DIR / 'vocab.json') as f:
         vocab = json.load(f)
     with open(PROC_DIR / 'test_references.json') as f:
         ref_map = json.load(f)
 
-    test_imgs_order = sorted(ref_map.keys())
+    # === ALIGNMENT FIX: Using the pickle dictionary method ===
+    with open(PROC_DIR / 'image_features.pkl', 'rb') as f:
+        all_image_features = pickle.load(f)
+
+    unique_test_image_names = sorted(ref_map.keys())
+
+    test_img = []
+    test_imgs_order = []
+    for img_name in unique_test_image_names:
+        if img_name in all_image_features: # Check if feature exists
+            test_img.append(all_image_features[img_name])
+            test_imgs_order.append(img_name)
+            
+    test_img = np.array(test_img)
+    # =========================================================
+
     id2word   = {v: k for k, v in vocab.items()}
     embed_dim = 256  # must match training
     max_len   = 35
@@ -262,7 +270,7 @@ def main():
         n_layers   = r['n_layers']
         units      = r['units']
 
-        keras_model = keras.models.load_model(r['saved_to'])
+        keras_model = keras.models.load_model(MODELS_DIR / r['saved_to'])
         weights     = extract_weights(keras_model, cell_type, n_layers)
         units_list  = [units] * n_layers
         decoder     = ScratchDecoder(cell_type, weights, vocab, embed_dim, units_list)
@@ -298,9 +306,9 @@ def main():
     best_lstm = max([r for r in scratch_results if r['cell_type'] == 'lstm'],
                     key=lambda x: x['bleu4'])
 
-    rnn_model  = keras.models.load_model(next(r['saved_to'] for r in train_results
+    rnn_model  = keras.models.load_model(next(MODELS_DIR / r['saved_to'] for r in train_results
                                               if r['tag'] == best_rnn['tag']))
-    lstm_model = keras.models.load_model(next(r['saved_to'] for r in train_results
+    lstm_model = keras.models.load_model(next(MODELS_DIR / r['saved_to'] for r in train_results
                                               if r['tag'] == best_lstm['tag']))
 
     rnn_w  = extract_weights(rnn_model,  'rnn',  best_rnn['n_layers'])
@@ -329,7 +337,7 @@ def main():
     n_layers_best= best_overall['n_layers']
     units_best   = best_overall['units']
 
-    model_best = keras.models.load_model(next(r['saved_to'] for r in train_results
+    model_best = keras.models.load_model(next(MODELS_DIR / r['saved_to'] for r in train_results
                                               if r['tag'] == tag_best))
     weights_best = extract_weights(model_best, cell_best, n_layers_best)
     dec_best = ScratchDecoder(cell_best, weights_best, vocab, embed_dim,
