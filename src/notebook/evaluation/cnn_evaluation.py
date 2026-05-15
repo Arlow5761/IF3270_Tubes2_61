@@ -35,6 +35,7 @@ from algorithm.neural.maxpool   import MaxPool2D
 from algorithm.neural.avgpool   import AvgPool2D
 from algorithm.neural.reshape   import Flatten
 from algorithm.neural.linear    import Linear
+from algorithm.neural.pad       import ZeroPad2D
 from algorithm.utility.image_utils import batch_loader
 
 # Import to ensure keras.models.load_model successfully resolves the custom layer
@@ -135,6 +136,9 @@ def build_scratch_model(keras_model: keras.Model):
                                 pool_size=tuple(cfg['pool_size']),
                                 strides=tuple(cfg['strides']),
                                 padding=cfg['padding'])
+
+        elif ltype == 'ZeroPadding2D':
+            current = ZeroPad2D(current, padding=cfg['padding'])
 
         elif ltype == 'Flatten':
             current = Flatten(current)
