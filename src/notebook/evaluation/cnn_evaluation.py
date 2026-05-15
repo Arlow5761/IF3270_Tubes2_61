@@ -2,11 +2,10 @@
 CNN Evaluation — From-Scratch Forward Propagation (IF3270 Tubes 2)
 ===================================================================
 Loads the best Keras model, rebuilds it from scratch using our NumPy
-Diffable nodes (shared Conv2D and non-shared LocallyConnected2D), then
-compares macro F1-scores on the test set.
+Diffable nodes, then compares macro F1-scores on the test set.
 
 Run from the repo root:
-    python src/notebook/cnn_evaluation.py
+    python src/notebook/evaluation/cnn_evaluation.py
 
 Prerequisites:
     - cnn_training.py has been run → models/ directory with .keras files
@@ -30,12 +29,16 @@ from algorithm.core.parameter import Parameter, Input
 from algorithm.function.relu    import ReLU
 from algorithm.function.softmax import Softmax
 from algorithm.neural.conv      import Conv2D
-from algorithm.neural.local     import LocallyConnected2D
+# Renamed to avoid collision with Keras Layer
+from algorithm.neural.local     import LocallyConnected2D as DiffableLocallyConnected2D
 from algorithm.neural.maxpool   import MaxPool2D
 from algorithm.neural.avgpool   import AvgPool2D
 from algorithm.neural.reshape   import Flatten
 from algorithm.neural.linear    import Linear
 from algorithm.utility.image_utils import batch_loader
+
+# Import to ensure keras.models.load_model successfully resolves the custom layer
+from compat.LocallyConnected2D import LocallyConnected2D as KerasLocallyConnected2D
 
 MODELS_DIR = REPO_ROOT / 'models'
 DATASET_DIR = REPO_ROOT / 'dataset'
@@ -44,7 +47,6 @@ TEST_DIR    = DATASET_DIR / 'seg_test' / 'seg_test'
 IMG_SIZE    = (150, 150)
 BATCH_SIZE  = 16          # smaller for from-scratch (NumPy is slower)
 CLASS_NAMES = ['buildings', 'forest', 'glacier', 'mountain', 'sea', 'street']
-
 
 
 def load_test_data(test_dir: Path, img_size: tuple = IMG_SIZE):
@@ -63,24 +65,10 @@ def load_test_data(test_dir: Path, img_size: tuple = IMG_SIZE):
     return np.stack(images), np.array(labels, dtype=np.int32)
 
 
-
-def build_scratch_model(keras_model: keras.Model,
-                        use_locally_connected: bool = False):
-    """Mirror a Keras CNN model using Diffable nodes.
-
-    Returns:
-        (input_node, output_node): the endpoints of the Diffable graph.
-    """
+def build_scratch_model(keras_model: keras.Model):
+    """Mirror a Keras CNN model using Diffable nodes natively."""
     input_node = Input()
     current = input_node
-
-    dummy = np.zeros((1, *IMG_SIZE, 3), dtype=np.float32)
-    layer_outputs = {}
-    if use_locally_connected:
-        for layer in keras_model.layers:
-            if layer.name != keras_model.layers[0].name:  # skip InputLayer
-                sub = keras.Model(inputs=keras_model.input, outputs=layer.output)
-                layer_outputs[layer.name] = sub.predict(dummy, verbose=0).shape
 
     for layer in keras_model.layers:
         ltype = type(layer).__name__
@@ -92,38 +80,49 @@ def build_scratch_model(keras_model: keras.Model,
 
         elif ltype == 'Conv2D':
             kernel_np, bias_np = weights
-            strides = tuple(cfg['strides'])
-            padding = cfg['padding']
-
-            if use_locally_connected:
-                out_shape = layer_outputs[layer.name]
-                oH, oW = out_shape[1], out_shape[2]
-                n_pos = oH * oW
-                kH, kW, C_in, C_out = kernel_np.shape
-                lc_kernel = np.tile(
-                    kernel_np.reshape(1, kH * kW * C_in, C_out),
-                    (n_pos, 1, 1),
-                )
-                lc_bias = np.tile(bias_np.reshape(1, C_out), (n_pos, 1))
-                k_node = Parameter(lc_kernel)
-                b_node = Parameter(lc_bias)
-                current = LocallyConnected2D(
-                    current, k_node, b_node,
-                    kernel_size=(kH, kW),
-                    strides=strides,
-                    padding=padding,
-                )
-            else:
-                k_node = Parameter(kernel_np)
-                b_node = Parameter(bias_np)
-                current = Conv2D(current, k_node, b_node,
-                                 strides=strides, padding=padding)
+            k_node = Parameter(kernel_np)
+            b_node = Parameter(bias_np)
+            
+            current = Conv2D(current, k_node, b_node,
+                             strides=tuple(cfg['strides']), 
+                             padding=cfg['padding'])
 
             activation = cfg.get('activation', 'linear')
-            if activation == 'relu':
-                current = ReLU(current)
-            elif activation == 'softmax':
-                current = Softmax(current)
+            if isinstance(activation, dict):
+                activation = activation.get('config', activation.get('name', 'linear'))
+            if isinstance(activation, str):
+                if activation.lower() == 'relu':
+                    current = ReLU(current)
+                elif activation.lower() == 'softmax':
+                    current = Softmax(current)
+
+        elif ltype == 'LocallyConnected2D':
+            kernel_np, bias_np = weights
+            
+            # Keras custom weights: (out_H, out_W, kH*kW*C_in, C_out)
+            # Diffable node expected: (out_H*out_W, kH*kW*C_in, C_out)
+            out_H, out_W, klen, C_out = kernel_np.shape
+            lc_kernel = kernel_np.reshape(out_H * out_W, klen, C_out)
+            lc_bias = bias_np.reshape(out_H * out_W, C_out)
+
+            k_node = Parameter(lc_kernel)
+            b_node = Parameter(lc_bias)
+
+            current = DiffableLocallyConnected2D(
+                current, k_node, b_node,
+                kernel_size=tuple(cfg['kernel_size']),
+                strides=(1, 1),    # custom keras implementation uses hardcoded strides=(1,1)
+                padding='valid',   # custom keras implementation uses hardcoded padding='valid'
+            )
+
+            activation = cfg.get('activation', 'linear')
+            if isinstance(activation, dict):
+                activation = activation.get('config', activation.get('name', 'linear'))
+            if isinstance(activation, str):
+                if activation.lower() == 'relu':
+                    current = ReLU(current)
+                elif activation.lower() == 'softmax':
+                    current = Softmax(current)
 
         elif ltype in ('MaxPooling2D',):
             current = MaxPool2D(current,
@@ -145,19 +144,21 @@ def build_scratch_model(keras_model: keras.Model,
             k_node = Parameter(kernel_np)
             b_node = Parameter(bias_np)
             current = Linear(current, k_node, b_node)
+            
             activation = cfg.get('activation', 'linear')
-            if activation == 'relu':
-                current = ReLU(current)
-            elif activation == 'softmax':
-                current = Softmax(current)
+            if isinstance(activation, dict):
+                activation = activation.get('config', activation.get('name', 'linear'))
+            if isinstance(activation, str):
+                if activation.lower() == 'relu':
+                    current = ReLU(current)
+                elif activation.lower() == 'softmax':
+                    current = Softmax(current)
 
         elif ltype == 'BatchNormalization':
-            # not implemented; training arch doesn't use BN so this shouldn't occur
             print(f"  [WARN] BatchNormalization layer '{layer.name}' not supported — skipping.")
             continue
 
     return input_node, current
-
 
 
 def predict_scratch(input_node: Input, output_node,
@@ -171,7 +172,6 @@ def predict_scratch(input_node: Input, output_node,
         out = output_node.get_value()
         preds.append(np.argmax(out, axis=1))
     return np.concatenate(preds)
-
 
 
 def main():
@@ -201,28 +201,19 @@ def main():
     print(f"  Keras macro F1: {keras_f1:.4f}")
     print(classification_report(y_test, keras_preds, target_names=CLASS_NAMES))
 
-    print("\n[From-scratch / Conv2D] Building graph …")
-    inp_shared, out_shared = build_scratch_model(keras_model, use_locally_connected=False)
-    print("[From-scratch / Conv2D] Running inference …")
-    scratch_shared_preds = predict_scratch(inp_shared, out_shared, x_test)
-    scratch_shared_f1    = f1_score(y_test, scratch_shared_preds, average='macro')
-    print(f"  From-scratch (Conv2D) macro F1: {scratch_shared_f1:.4f}")
-    print(classification_report(y_test, scratch_shared_preds, target_names=CLASS_NAMES))
-
-    print("\n[From-scratch / LocallyConnected2D] Building graph …")
-    inp_lc, out_lc = build_scratch_model(keras_model, use_locally_connected=True)
-    print("[From-scratch / LocallyConnected2D] Running inference …")
-    scratch_lc_preds = predict_scratch(inp_lc, out_lc, x_test)
-    scratch_lc_f1    = f1_score(y_test, scratch_lc_preds, average='macro')
-    print(f"  From-scratch (LocallyConnected2D) macro F1: {scratch_lc_f1:.4f}")
-    print(classification_report(y_test, scratch_lc_preds, target_names=CLASS_NAMES))
+    print("\n[From-scratch] Building graph …")
+    inp_scratch, out_scratch = build_scratch_model(keras_model)
+    
+    print("[From-scratch] Running inference …")
+    scratch_preds = predict_scratch(inp_scratch, out_scratch, x_test)
+    scratch_f1    = f1_score(y_test, scratch_preds, average='macro')
+    print(f"  From-scratch macro F1: {scratch_f1:.4f}")
+    print(classification_report(y_test, scratch_preds, target_names=CLASS_NAMES))
 
     print("\n══ Summary ══")
-    print(f"  Keras                 macro F1 = {keras_f1:.4f}")
-    print(f"  From-scratch Conv2D   macro F1 = {scratch_shared_f1:.4f}  "
-          f"(diff = {abs(keras_f1 - scratch_shared_f1):.6f})")
-    print(f"  From-scratch LC2D     macro F1 = {scratch_lc_f1:.4f}  "
-          f"(diff = {abs(keras_f1 - scratch_lc_f1):.6f})")
+    print(f"  Keras           macro F1 = {keras_f1:.4f}")
+    print(f"  From-scratch    macro F1 = {scratch_f1:.4f}  "
+          f"(diff = {abs(keras_f1 - scratch_f1):.6f})")
 
     print("\n══ All 16 variants ══")
     print(f"{'Tag':<42}  {'val F1':>8}  {'test F1':>8}  {'params':>10}")

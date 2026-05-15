@@ -7,8 +7,13 @@ class LocallyConnected2D(layers.Layer):
     """A custom implementation of LocallyConnected2D for Keras 3."""
     def __init__(self, filters, kernel_size, activation=None, **kwargs):
         super().__init__(**kwargs)
+
+        if isinstance(kernel_size, int):
+            self.kernel_size = (kernel_size, kernel_size)
+        else:
+            self.kernel_size = tuple(kernel_size)
+
         self.filters = filters
-        self.kernel_size = kernel_size if isinstance(kernel_size, tuple) else (kernel_size, kernel_size)
         self.activation = keras.activations.get(activation)
 
     def build(self, input_shape):
