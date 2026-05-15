@@ -24,6 +24,8 @@ from tensorflow import keras
 from tensorflow.keras import layers
 from sklearn.metrics import f1_score
 
+from ...compat import LocallyConnected2D
+
 REPO_ROOT   = Path(__file__).resolve().parents[3]
 DATASET_DIR = REPO_ROOT / 'dataset' / 'intel-image-classification'
 MODELS_DIR  = REPO_ROOT / 'models'
@@ -94,10 +96,10 @@ def build_locally_connected_model(n_blocks: int, filters: list, kernel_size: tup
     for i in range(n_blocks):
         # 1. Apply manual ZeroPadding to the spatial dimensions
         model.add(layers.ZeroPadding2D(padding=(pad_h, pad_w)))
-        
+
         # 2. Apply LocallyConnected2D with padding='valid'
-        model.add(layers.LocallyConnected2D(filters[i], kernel_size, padding='valid', activation='relu'))
-        
+        model.add(LocallyConnected2D(filters[i], kernel_size, activation='relu'))
+
         # 3. Apply Pooling
         model.add(pool_layer(pool_size=(2, 2), strides=(2, 2)))
 
@@ -203,7 +205,7 @@ def main():
             'val_acc':        history.history['val_accuracy'],
             'val_macro_f1':   val_metrics['macro_f1'],
             'test_macro_f1':  test_metrics['macro_f1'],
-            'saved_to':       str(save_path),
+            'saved_to':       str(save_path.relative_to(MODELS_DIR)),
             'total_params':   model.count_params(),
         }
         results.append(result)
@@ -229,22 +231,22 @@ def main():
     # ---------------------------------------------------------
     print("\n── Training Locally Connected Version of Best Model ──")
     best_cfg = best['config']
-    
+
     print(f"Building Locally Connected model based on config: {best['tag']}")
-    
+
     lc_model = build_locally_connected_model(
         n_blocks    = best_cfg['n_blocks'],
         filters     = best_cfg['filters'],
         kernel_size = tuple(best_cfg['kernel_size']),
         pool_type   = best_cfg['pool_type'],
     )
-    
+
     lc_model.compile(
         optimizer = keras.optimizers.Adam(learning_rate=1e-3),
         loss      = keras.losses.SparseCategoricalCrossentropy(),
         metrics   = ['accuracy'],
     )
-    
+
     # Print summary to show the parameter explosion typical of LocallyConnected2D
     lc_model.summary()
 
@@ -265,7 +267,7 @@ def main():
     lc_test_metrics = evaluate_model(lc_model, test_ds)
 
     lc_tag = "lc_" + best['tag']
-    lc_save_path = MODELS_DIR / f'model_{lc_tag}.keras'
+    lc_save_path = MODELS_DIR / f'{lc_tag}.keras'
     lc_model.save(str(lc_save_path))
 
     print(f"\n[Locally Connected] val  macro-F1 = {lc_val_metrics['macro_f1']:.4f}")

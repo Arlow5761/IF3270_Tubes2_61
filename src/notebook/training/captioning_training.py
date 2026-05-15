@@ -22,7 +22,7 @@ from tensorflow import keras
 from tensorflow.keras import layers
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 
-REPO_ROOT  = Path.cwd()
+REPO_ROOT  = Path(__file__).resolve().parents[3]
 PROC_DIR   = REPO_ROOT / 'data_processed'
 MODELS_DIR = REPO_ROOT / 'models_captioning'
 MODELS_DIR.mkdir(exist_ok=True)
@@ -239,7 +239,7 @@ def main():
             'val_loss':    history.history['val_loss'],
             'test_bleu4':  float(bleu4),
             'train_time':  float(train_time),
-            'saved_to':    str(save_path),
+            'saved_to':    str(save_path.relative_to(MODELS_DIR)),
             'n_params':    model.count_params(),
         })
 
