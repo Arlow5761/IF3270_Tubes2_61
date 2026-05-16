@@ -13,6 +13,9 @@ REPO_ROOT = Path("/content/IF3270_Tubes2_61")
 import nltk
 nltk.download('wordnet')
 
+import nltk
+nltk.download('wordnet')
+
 import tensorflow as tf
 from tensorflow import keras
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
@@ -80,54 +83,39 @@ class ScratchDecoder:
         h   = o_t * np.tanh(c)
         return h, c
 
-    def _step(self, x, hs, cs):
-        """Advance the recurrent stack by one timestep (returns new hs, cs and top output)."""
-        new_hs = [h.copy() for h in hs]
-        new_cs = [c.copy() for c in cs]
-        cur = x
-        for li in range(self.n_layers):
-            if self.cell_type == 'rnn':
-                new_hs[li] = self._rnn_step(cur, new_hs[li], li)
-            else:
-                new_hs[li], new_cs[li] = self._lstm_step(cur, new_hs[li], new_cs[li], li)
-            cur = new_hs[li]
-        return cur, new_hs, new_cs
+    def generate(self, img_feat: np.ndarray, max_len: int = 35) -> list:
+        img_proj = _relu(img_feat @ self.w['img_proj_W'] + self.w['img_proj_b'])
 
-    def _init_states(self, img_feat: np.ndarray):
-        """Initialise (hs, cs) according to inject_mode. For 'pre', also prime
-        the stack by feeding the projected image so the next input is <start>."""
         hs = [np.zeros(u) for u in self.units]
         cs = [np.zeros(u) for u in self.units]
-
-        if self.inject_mode == 'init':
-            h_init = np.tanh(img_feat @ self.w['h_init_W'] + self.w['h_init_b'])
-            hs[0] = h_init
-            if self.cell_type == 'lstm':
-                cs[0] = np.tanh(img_feat @ self.w['c_init_W'] + self.w['c_init_b'])
-        else:
-            img_proj = _relu(img_feat @ self.w['img_proj_W'] + self.w['img_proj_b'])
-            _, hs, cs = self._step(img_proj, hs, cs)
-        return hs, cs
-
-    def generate(self, img_feat: np.ndarray, max_len: int = 35) -> list:
-        """Greedy decoder."""
-        hs, cs = self._init_states(img_feat)
 
         start_id = self.vocab['<start>']
         end_id   = self.vocab['<end>']
         pad_id   = self.vocab['<pad>']
         E        = self.w['embedding']
 
-        x_t = E[start_id]
+        def _step(x_in):
+            cur = x_in
+            for li in range(self.n_layers):
+                if self.cell_type == 'rnn':
+                    hs[li] = self._rnn_step(cur, hs[li], li)
+                else:
+                    hs[li], cs[li] = self._lstm_step(cur, hs[li], cs[li], li)
+                cur = hs[li]
+            return cur
+
+        # prime the recurrent stack with the image, then <start>
+        _step(img_proj)
+        x_t = _step(E[start_id])
+
         tokens = []
         for _ in range(max_len):
-            out, hs, cs = self._step(x_t, hs, cs)
-            logits = out @ self.w['output_W'] + self.w['output_b']
+            logits = x_t @ self.w['output_W'] + self.w['output_b']
             tok    = int(np.argmax(_softmax(logits)))
             if tok == end_id or tok == pad_id:
                 break
             tokens.append(tok)
-            x_t = E[tok]
+            x_t = _step(E[tok])
 
         return [self.id2word.get(t, '<unk>') for t in tokens]
 
@@ -365,14 +353,11 @@ def main():
     print('─' * 60)
 
     scratch_results = []
-    for r in sorted(train_results,
-                    key=lambda x: (x.get('inject_mode', 'pre'), x['cell_type'],
-                                   x['n_layers'], x['units'])):
-        tag         = r['tag']
-        cell_type   = r['cell_type']
-        n_layers    = r['n_layers']
-        units       = r['units']
-        inject_mode = r.get('inject_mode', 'pre')
+    for r in sorted(train_results, key=lambda x: (x['cell_type'], x['n_layers'], x['units'])):
+        tag        = r['tag']
+        cell_type  = r['cell_type']
+        n_layers   = r['n_layers']
+        units      = r['units']
 
         keras_model = keras.models.load_model(MODELS_DIR / r['saved_to'])
         weights     = extract_weights(keras_model, cell_type, n_layers)

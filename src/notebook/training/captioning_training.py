@@ -91,30 +91,16 @@ def build_model(vocab_size: int, feature_dim: int, embed_dim: int,
         # Image → initial state(s) for first recurrent layer.
         h_init = layers.Dense(units, activation='tanh', name='h_init')(img_feat)
         if cell_type == 'lstm':
-            c_init = layers.Dense(units, activation='tanh', name='c_init')(img_feat)
+            x = layers.LSTM(units, return_sequences=True,
+                            name=f'lstm_{i}')(x)
+        else:
+            x = layers.SimpleRNN(units, return_sequences=True,
+                                 activation='tanh', name=f'rnn_{i}')(x)
 
-        # mask_zero=False here because Keras forbids combining a masked input
-        # with `initial_state` on RNN layers (the mask propagation paths conflict).
-        cap_emb = layers.Embedding(vocab_size, embed_dim,
-                                   mask_zero=False, name='embedding')(dec_input)
-        x = cap_emb
-
-        for i in range(n_layers):
-            if cell_type == 'lstm':
-                rnn_layer = layers.LSTM(units, return_sequences=True, name=f'lstm_{i}')
-            else:
-                rnn_layer = layers.SimpleRNN(units, return_sequences=True,
-                                             activation='tanh', name=f'rnn_{i}')
-            if i == 0:
-                init = [h_init, c_init] if cell_type == 'lstm' else [h_init]
-                x = rnn_layer(x, initial_state=init)
-            else:
-                x = rnn_layer(x)
-
-        out = layers.Dense(vocab_size, activation='softmax', name='output')(x)
-
-    else:
-        raise ValueError(f'unknown inject_mode={inject_mode!r}; expected "pre" or "init"')
+    # drop the image timestep; output[t] = state after seeing img + dec_input[0..t]
+    # so output[t] predicts dec_target[t] given the correct history
+    x   = layers.Lambda(lambda t: t[:, 1:max_len + 1, :], name='slice')(x)
+    out = layers.Dense(vocab_size, activation='softmax', name='output')(x)
 
     return keras.Model(inputs=[img_feat, dec_input], outputs=out,
                        name=f'cap_{inject_mode}_{cell_type}_l{n_layers}_u{units}')
