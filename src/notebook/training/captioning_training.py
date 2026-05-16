@@ -32,10 +32,13 @@ EPOCHS      = 30
 BATCH_SIZE  = 64
 LEARNING_RATE = 1e-3
 
-# Experiment grid: 2 × 3 × 2 = 12
-CELL_TYPES  = ['rnn', 'lstm']
-N_LAYERS    = [1, 2, 3]
-HIDDEN_DIMS = [128, 512]
+# Experiment grid: 2 inject modes × 2 cell × 3 layers × 2 hidden = 24
+# 'pre'  = pre-inject (image concatenated as first timestep)
+# 'init' = init-inject (image projected to RNN initial hidden state)
+INJECT_MODES = ['pre', 'init']
+CELL_TYPES   = ['rnn', 'lstm']
+N_LAYERS     = [1, 2, 3]
+HIDDEN_DIMS  = [128, 512]
 
 
 def load_data(split: str):
@@ -48,29 +51,45 @@ def load_data(split: str):
 
 def build_model(vocab_size: int, feature_dim: int, embed_dim: int,
                 units: int, n_layers: int, cell_type: str,
-                max_len: int) -> keras.Model:
-    """Pre-inject encoder-decoder captioning model.
+                max_len: int, inject_mode: str = 'pre') -> keras.Model:
+    """Encoder-decoder captioning model.
+
+    inject_mode:
+      'pre'  — image projected to (B,1,E) and concatenated as first timestep;
+               output sliced [1:max_len+1] so each h[t+1] predicts target[t].
+      'init' — image projected to (B,units) as initial hidden (and cell, for
+               LSTM) state of the first recurrent layer; deeper layers start
+               at zero. Output aligned directly with target — no slice needed.
 
     Inputs:
         img_feat  : (batch, feature_dim)
-        dec_input : (batch, max_len)  [<start>, w₁, ..., w_{max_len-1}]
-
+        dec_input : (batch, max_len)  [<start>, w₀, ..., w_{max_len-2}]
     Output:
-        predictions: (batch, max_len, vocab_size)   aligned with dec_target
+        predictions: (batch, max_len, vocab_size)
     """
-    # Image input
     img_feat  = keras.Input(shape=(feature_dim,), name='img_feat')
-    img_proj  = layers.Dense(embed_dim, activation='relu', name='img_proj')(img_feat)
-    img_proj  = layers.Reshape((1, embed_dim))(img_proj)            # (B, 1, E)
-
-    # Caption input
     dec_input = keras.Input(shape=(max_len,), name='dec_input')
-    cap_emb   = layers.Embedding(vocab_size, embed_dim,
-                                 mask_zero=True, name='embedding')(dec_input)  # (B, T, E)
 
-    x = layers.Concatenate(axis=1)([img_proj, cap_emb])
+    if inject_mode == 'pre':
+        img_proj = layers.Dense(embed_dim, activation='relu', name='img_proj')(img_feat)
+        img_proj = layers.Reshape((1, embed_dim))(img_proj)
+        cap_emb  = layers.Embedding(vocab_size, embed_dim,
+                                    mask_zero=True, name='embedding')(dec_input)
+        x = layers.Concatenate(axis=1)([img_proj, cap_emb])
 
-    for i in range(n_layers):
+        for i in range(n_layers):
+            if cell_type == 'lstm':
+                x = layers.LSTM(units, return_sequences=True, name=f'lstm_{i}')(x)
+            else:
+                x = layers.SimpleRNN(units, return_sequences=True,
+                                     activation='tanh', name=f'rnn_{i}')(x)
+
+        x   = layers.Lambda(lambda t: t[:, 1:max_len + 1, :], name='slice')(x)
+        out = layers.Dense(vocab_size, activation='softmax', name='output')(x)
+
+    elif inject_mode == 'init':
+        # Image → initial state(s) for first recurrent layer.
+        h_init = layers.Dense(units, activation='tanh', name='h_init')(img_feat)
         if cell_type == 'lstm':
             x = layers.LSTM(units, return_sequences=True,
                             name=f'lstm_{i}')(x)
@@ -84,7 +103,7 @@ def build_model(vocab_size: int, feature_dim: int, embed_dim: int,
     out = layers.Dense(vocab_size, activation='softmax', name='output')(x)
 
     return keras.Model(inputs=[img_feat, dec_input], outputs=out,
-                       name=f'cap_{cell_type}_l{n_layers}_u{units}')
+                       name=f'cap_{inject_mode}_{cell_type}_l{n_layers}_u{units}')
 
 
 
@@ -186,14 +205,15 @@ def main():
 
     results = []
 
-    for cell_type, n_layers, units in itertools.product(
-            CELL_TYPES, N_LAYERS, HIDDEN_DIMS):
-        tag = f'{cell_type}_l{n_layers}_u{units}'
+    for inject_mode, cell_type, n_layers, units in itertools.product(
+            INJECT_MODES, CELL_TYPES, N_LAYERS, HIDDEN_DIMS):
+        tag = f'{inject_mode}_{cell_type}_l{n_layers}_u{units}'
         print(f'\n{"─"*60}')
         print(f'[{tag}]')
 
         model = build_model(vocab_size, feature_dim, EMBED_DIM,
-                            units, n_layers, cell_type, max_len)
+                            units, n_layers, cell_type, max_len,
+                            inject_mode=inject_mode)
         model.compile(
             optimizer = keras.optimizers.Adam(LEARNING_RATE),
             loss      = keras.losses.SparseCategoricalCrossentropy(),
@@ -234,6 +254,7 @@ def main():
 
         results.append({
             'tag':         tag,
+            'inject_mode': inject_mode,
             'cell_type':   cell_type,
             'n_layers':    n_layers,
             'units':       units,
